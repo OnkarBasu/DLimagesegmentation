@@ -293,7 +293,58 @@ weights**.
                   │
        skip × attention_map → attended skip → decoder
 ```
+## 🏗️ How the Model Works
 
+The model looks at a photo and decides what every single pixel belongs to — not the photo 
+as a whole, but each pixel individually. To do this it uses an **Attention U-Net**, which 
+works in three stages.
+
+---
+
+### The Encoder — understanding the scene
+
+The left side of the network takes the input photo and progressively shrinks it down.
+160×160 pixels becomes 80×80, then 40×40, all the way down to 10×10. At each step the
+image gets smaller but richer — the model is zooming out to understand the big picture.
+By the bottom it knows things like *"there is a vehicle in the upper right"* but has
+lost the fine detail about exact edges and shapes.
+
+---
+
+### The Decoder — rebuilding the detail
+
+The right side works in reverse — it takes that compressed understanding and expands it
+back up to the original 160×160 size, gradually painting class labels onto every pixel.
+The problem is that zooming back in loses sharpness. To solve this, the encoder saves a
+copy of the image at each resolution level before shrinking it. When the decoder reaches
+that same resolution on the way back up, it receives that saved copy and uses it to
+sharpen its predictions. These are called **skip connections** — the horizontal arrows
+in the architecture diagram.
+
+---
+
+### Attention Gates — focusing on what matters
+
+Standard skip connections pass everything across — useful detail and noise alike.
+**Attention gates** add a filter before each skip connection. They look at what the
+decoder is currently building and produce a map that highlights relevant pixels and
+suppresses irrelevant ones. When the model is trying to find a person, the gate
+brightens person-like regions and dims everything else. This is especially useful
+for small or partially hidden objects that would otherwise get ignored.
+
+---
+
+### Inside each block
+
+Every level of the network is built from two convolutional layers back to back.
+Each one slides a 3×3 filter across the image asking *"does this patch look like an
+edge, a colour change, a texture?"* — hundreds of times simultaneously, each filter
+hunting for a different pattern. **Dropout** randomly switches off 10% of features
+during training, stopping the model from memorising the training images and forcing
+it to learn patterns that generalise to new photos.
+
+At the very end, a single layer maps everything to 3 scores per pixel — one per class.
+Whichever score is highest wins, and that is the final coloured mask.
 ### Model specifications
 
 | Parameter | Value |
