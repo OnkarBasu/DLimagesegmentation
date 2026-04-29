@@ -319,7 +319,7 @@ Median frequency used: **10.144%**. A mistake on an Airplane pixel is penalised 
 
 ### Training Curve
 
-![Training Curve](results/training_curve.png)
+![Training Curve](results/training_curve(2).png)
 
 Both losses decrease consistently across all 60 epochs. The validation loss stays below the training loss throughout the entire run — this is a sign of good generalisation rather than overfitting. The warmup phase in epochs 0–5 stabilises the early training, and both curves continue declining smoothly all the way to epoch 60. The gap between train and val loss is healthy and stable, meaning the model learned general patterns rather than memorising training images.
 
@@ -327,7 +327,7 @@ Both losses decrease consistently across all 60 epochs. The validation loss stay
 
 ### Sample Predictions
 
-![Sample Predictions](results/sample_predictions.png)
+![Sample Predictions](results/sample.png)
 
 Each group shows: original photo on top, correct ground truth mask in the middle, model prediction on the bottom. Dog segmentation is particularly strong — the model captures the shape cleanly. Cars produce good outlines. Airplanes work well when they are large in frame. Background sometimes bleeds into object boundaries, which is expected at 160×160 resolution where fine edges lose detail.
 
