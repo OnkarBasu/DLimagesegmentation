@@ -8,9 +8,9 @@
 ![Colab](https://img.shields.io/badge/Platform-Google_Colab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-8A2BE2?style=for-the-badge)
 
-**Semantic pixel-level segmentation of street scenes built entirely from scratch using PyTorch.**
-Every pixel in a photograph is classified into one of three meaningful classes using a custom
-Attention U-Net trained on real-world data from Google OpenImages v7.
+**Pixel-level image segmentation of real-world photos built entirely from scratch using PyTorch.**
+Every pixel in a photo gets labelled as one of four classes — no pretrained weights, no shortcuts.
+Trained on Google OpenImages v7 using a custom Attention U-Net on a single GPU.
 
 </div>
 
@@ -22,7 +22,7 @@ Attention U-Net trained on real-world data from Google OpenImages v7.
 - [Classes and Labels](#-classes-and-labels)
 - [Dataset](#-dataset--openimages-v7)
 - [Data Pipeline](#-data-pipeline)
-- [Model Architecture](#-model-architecture)
+- [How the Model Works](#-how-the-model-works)
 - [Training Setup](#-training-setup)
 - [Results](#-results)
 - [Project Structure](#-project-structure)
@@ -34,73 +34,60 @@ Attention U-Net trained on real-world data from Google OpenImages v7.
 
 ## 🎯 What This Project Does
 
-Given any street photograph, this model analyses every single pixel and assigns it a class label.
-This task is called **semantic segmentation** — understanding a scene not just by detecting objects
-with bounding boxes, but by painting a precise coloured mask over the entire image.
+Given any photo, the model colours every single pixel according to what it belongs to. Not just a bounding box around an object — every pixel gets its own label. This is called **semantic segmentation**.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
 │                                                                      │
 │   INPUT                              OUTPUT                          │
 │                                                                      │
-│   A street photograph        →       Pixel-level coloured mask       │
+│   Any street or outdoor photo  →     Pixel-level coloured mask       │
 │                                                                      │
-│   [person walking past]      →       ░░░░░░░░░░░░░░░░░░░ Background  │
-│   [cars on road]             →       ████████████████████ Person     │
-│   [buildings behind]         →       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ Vehicle    │
+│   [dog in park]                →     ░░░░░░░░░░░░░░░░░░ Background   │
+│   [car on road]                →     ████████████████ Car            │
+│   [plane in sky]               →     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ Airplane      │
+│   [dog running]                →     ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ Dog           │
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Unlike classification (one label per image) or detection (bounding boxes), segmentation requires
-the model to make a separate decision for every pixel — a 160×160 image requires 25,600 individual
-pixel-level classifications per forward pass.
+A 160×160 image requires 25,600 individual pixel-level decisions per forward pass. The model makes all of them in one shot.
 
 ---
 
 ## 🏷️ Classes and Labels
 
-The model segments each image into **3 classes**. Each class is assigned a fixed integer index
-stored directly as the pixel value in the label map.
+The model segments images into **4 classes**. Each class has a fixed integer index stored as the pixel value in the label map and a unique colour for visualisation.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │                         CLASS DEFINITIONS                              │
-├───────────┬──────────────┬────────────────┬───────────────────────────┤
-│   Index   │  Class Name  │  Mask Colour   │  What it covers           │
-├───────────┼──────────────┼────────────────┼───────────────────────────┤
-│     0     │  Background  │  Gray          │  Road, sky, buildings,    │
-│           │              │  RGB(100,100,  │  pavement, trees, and     │
-│           │              │  100)          │  anything that is not     │
-│           │              │                │  a person or vehicle      │
-├───────────┼──────────────┼────────────────┼───────────────────────────┤
-│     1     │  Person      │  Purple        │  Any human body —         │
-│           │              │  RGB(127,119,  │  full or partial,         │
-│           │              │  221)          │  near or far,             │
-│           │              │                │  any size in frame        │
-├───────────┼──────────────┼────────────────┼───────────────────────────┤
-│     2     │  Vehicle     │  Orange        │  Cars AND trucks merged   │
-│           │              │  RGB(216, 90,  │  into one superclass.     │
-│           │              │  48)           │  Any motorised            │
-│           │              │                │  four-wheeled vehicle     │
-└───────────┴──────────────┴────────────────┴───────────────────────────┘
+├───────────┬──────────────┬──────────────────┬─────────────────────────┤
+│   Index   │  Class Name  │  Mask Colour     │  What it covers         │
+├───────────┼──────────────┼──────────────────┼─────────────────────────┤
+│     0     │  Background  │  Gray            │  Road, sky, grass,      │
+│           │              │  RGB(100,100,100)│  buildings, anything    │
+│           │              │                  │  not in the 3 classes   │
+├───────────┼──────────────┼──────────────────┼─────────────────────────┤
+│     1     │  Car         │  Orange          │  Cars of any kind,      │
+│           │              │  RGB(216, 90, 48)│  any angle, any size    │
+├───────────┼──────────────┼──────────────────┼─────────────────────────┤
+│     2     │  Airplane    │  Blue            │  Aircraft — commercial, │
+│           │              │  RGB(66, 133,244)│  military, any type     │
+├───────────┼──────────────┼──────────────────┼─────────────────────────┤
+│     3     │  Dog         │  Green           │  Any dog breed,         │
+│           │              │  RGB(52, 168, 83)│  full or partial body   │
+└───────────┴──────────────┴──────────────────┴─────────────────────────┘
 ```
 
-> **Why Vehicle instead of separate Car and Truck?**
->
-> Cars and trucks share approximately 90% of their visual features — wheels, metal body panels,
-> windows, and rectangular silhouette. Training a from-scratch model on limited data to reliably
-> distinguish them produces severe class confusion. Merging them into a single **Vehicle**
-> superclass is the standard approach used in autonomous driving research and produces
-> significantly cleaner segmentation boundaries.
+> **Why these three classes?**
+> Car, Airplane, and Dog are visually about as different from each other as you can get — completely different shapes, sizes, textures, and contexts. A dog looks nothing like a plane. A plane looks nothing like a car. This makes them easier for a from-scratch model to separate cleanly, which leads to better training signal and more interpretable results.
 
 ---
 
 ## 📦 Dataset — OpenImages v7
 
-**Google OpenImages v7** is one of the largest publicly available computer vision datasets,
-containing approximately 9 million images annotated by professional human annotators
-under a CC BY 4.0 licence.
+**Google OpenImages v7** is one of the largest publicly available image datasets, with around 9 million photos annotated by professional human labellers.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -110,33 +97,29 @@ under a CC BY 4.0 licence.
 │  Segmentation masks        │  2.8 million objects               │
 │  Segmentation classes      │  350 classes                       │
 │  Licence                   │  CC BY 4.0 (free for any use)      │
-│  Annotation quality        │  Professional human annotators     │
-│  Download tool used        │  FiftyOne Python library           │
+│  Download tool             │  FiftyOne Python library           │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Splits used in this project
+### Splits used
 
-| Split | Purpose | Images |
+| Split | Purpose | Count |
 |:---:|:---:|:---:|
-| `train` | Teaching the model — seen during training | 1,000 |
-| `test` | Final evaluation only — never seen during training | 100 |
+| `train` | Teaching the model | 2,000 images |
+| `test` | Final evaluation only — never seen during training | 200 images |
 
-### How OpenImages stores masks
+### Pixel distribution in training data
 
-OpenImages provides **one binary PNG file per object instance**, not one label map per image.
-A photo with 3 people and 2 cars produces 5 separate mask files:
+After downloading and converting masks, here is how pixels are distributed across the 2,000 training images:
 
-```
-street_photo.jpg
-    │
-    ├── person_mask_01.png   ← white pixels = first person
-    ├── person_mask_02.png   ← white pixels = second person
-    ├── car_mask_01.png      ← white pixels = first car
-    └── truck_mask_01.png    ← white pixels = the truck
-```
+| Class | Total Pixels | Frequency | Class Weight |
+|:---|:---:|:---:|:---:|
+| Background | 1,172,840,490 | 78.015% | 0.0549 |
+| Car | 249,743,505 | 16.612% | 0.2578 |
+| Dog | 55,249,821 | 3.675% | 1.1651 |
+| Airplane | 25,522,600 | 1.698% | 2.5222 |
 
-These per-instance masks are merged into a single unified label map before training.
+Background dominates at 78% which is expected — most of any photo is not a car, plane, or dog. This imbalance is handled through **median frequency class weighting** (explained in Training Setup).
 
 ---
 
@@ -150,87 +133,74 @@ These per-instance masks are merged into a single unified label map before train
 STEP 1 — DOWNLOAD
 ┌──────────────────────────────────────────────────────────────────┐
 │  FiftyOne connects to OpenImages v7                              │
-│  Downloads only images containing Person / Car / Truck           │
-│  1,000 training images  +  100 test images                       │
+│  Downloads only photos containing Car, Airplane, or Dog          │
+│  2,000 training images  +  200 test images                       │
+│  Each image comes with per-instance binary mask PNGs             │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
 STEP 2 — MASK CONVERSION
 ┌──────────────────────────────────────────────────────────────────┐
-│  Multiple binary PNGs  ──►  Single unified label map             │
+│  OpenImages gives one black/white PNG per object instance        │
+│  We merge all instances into one single label map per photo      │
 │                                                                  │
-│  For each object in the photo:                                   │
-│    1. Read bounding box (normalised 0.0–1.0 coordinates)         │
-│    2. Convert to pixel coordinates                               │
-│    3. Resize binary mask crop to bounding box size               │
+│  For each object detected:                                       │
+│    1. Read bounding box coordinates (normalised 0–1)             │
+│    2. Convert to pixel coordinates using image size              │
+│    3. Resize binary mask to match bounding box pixels            │
 │    4. Paint class index into label map at that location          │
 │                                                                  │
-│  Result: one PNG per image — pixel value = class index           │
-│    0 = background  │  1 = person  │  2 = car  │  3 = truck       │
+│  Saved as PNG — pixel value = class index (0, 1, 2, or 3)       │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
 STEP 3 — SAVE TO GOOGLE DRIVE
 ┌──────────────────────────────────────────────────────────────────┐
-│  data/train/images/  ← 1,000 street photos (.jpg)                │
-│  data/train/masks/   ← 1,000 label maps   (.png)                 │
-│  data/test/images/   ←   100 street photos (.jpg)                │
-│  data/test/masks/    ←   100 label maps   (.png)                 │
+│  segmentation_project_v2/data/train/images/  ← 2,000 photos     │
+│  segmentation_project_v2/data/train/masks/   ← 2,000 label maps │
+│  segmentation_project_v2/data/test/images/   ←   200 photos     │
+│  segmentation_project_v2/data/test/masks/    ←   200 label maps │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
-STEP 4 — CLASS REMAPPING  (at load time, not on disk)
-┌──────────────────────────────────────────────────────────────────┐
-│  Masks on disk  :  0=background  1=person  2=car  3=truck        │
-│  During loading :  mask[mask == 3] = 2                           │
-│  In memory      :  0=background  1=person  2=vehicle             │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 5 — AUGMENTATION  (training only)
+STEP 4 — AUGMENTATION  (training split only)
 ┌──────────────────────────────────────────────────────────────────┐
 │  Transform              │  Probability  │  Effect                │
 │  ───────────────────────┼───────────────┼──────────────────────  │
 │  Horizontal flip        │  0.50         │  Mirror left/right     │
 │  Vertical flip          │  0.10         │  Mirror up/down        │
-│  Random 90° rotation    │  0.20         │  Rotate image          │
+│  Random 90° rotation    │  0.20         │  Rotate                │
 │  Colour jitter          │  0.40         │  Vary brightness       │
 │  Gaussian blur          │  0.20         │  Slight blur           │
 │  ImageNet normalise     │  1.00         │  Always applied        │
+│                                                                  │
+│  Spatial transforms applied to image AND mask in sync            │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
-STEP 6 — COPY TO LOCAL SSD  (once per session)
+STEP 5 — COPY TO LOCAL SSD  (once per Colab session)
 ┌──────────────────────────────────────────────────────────────────┐
-│  Google Drive (~10 MB/s)  ──►  Local SSD (~500 MB/s)             │
-│  One-time copy — all epoch reads from fast local storage         │
+│  Google Drive (~10 MB/s)  →  Local SSD (~500 MB/s)               │
+│  One-time copy at session start — all training reads from SSD    │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            ▼
-STEP 7 — PYTORCH DATALOADER
+STEP 6 — PYTORCH DATALOADER
 ┌──────────────────────────────────────────────────────────────────┐
 │  batch_size=16  │  num_workers=2  │  pin_memory=True             │
 │  shuffle=True (train)  │  shuffle=False (test)                   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### Pixel class distribution
-
-```
-  Background  ████████████████████████████████████████░  ~84%
-  Vehicle     █████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  ~12%
-  Person      ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   ~4%
-```
-
 ---
 
-## 🏗️ Model Architecture
+## 🏗️ How the Model Works
 
-### Overview
+The model is an **Attention U-Net** — a U-shaped encoder-decoder network with attention gates at every skip connection. Everything was written from scratch in PyTorch with no pretrained weights.
 
-The model is an **Attention U-Net** — a U-shaped convolutional encoder-decoder with attention
-gates at every skip connection. Built entirely from scratch in PyTorch with **zero pretrained
-weights**.
+### The big picture
+
+The encoder shrinks the image progressively — 160×160 → 80×80 → 40×40 → 20×20 → 10×10 — learning increasingly abstract features at each step. The decoder expands it back up to the original size, painting class labels as it goes. Skip connections pass fine-grained detail from the encoder to the decoder at each resolution level so boundaries stay sharp.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
@@ -239,7 +209,6 @@ weights**.
 ╚══════════════════════════════════════════════════════════════════════╝
 
   ENCODER (left — shrinks)              DECODER (right — grows)
-  ─────────────────────────             ──────────────────────────
 
   ┌─────────────────┐                       ┌─────────────────┐
   │  DoubleConv     │                       │  DoubleConv     │
@@ -264,87 +233,16 @@ weights**.
   │  256 → 512 ch   │──── AttentionGate ───►│  1024 → 512 ch  │
   │  20 × 20        │                       │  20 × 20        │
   └────────┬────────┘                       └────────▲────────┘
-           │  MaxPool (÷2)                           │  ConvTranspose (×2)
            └──────────────► BOTTLENECK ──────────────┘
                             512 → 1024 ch  │  10 × 10
 
-  OUTPUT  (batch, 3, 160, 160) — argmax → predicted class per pixel
+  OUTPUT  (batch, 4, 160, 160) — argmax → one class per pixel
 ```
 
-### Building block — DoubleConv
+### What attention gates actually do
 
-```
-  input
-    ├─ Conv2d (3×3)  →  BatchNorm  →  ReLU  →  Dropout2d (p=0.1)
-    └─ Conv2d (3×3)  →  BatchNorm  →  ReLU
-  output  (same spatial size, new channel count)
-```
+Standard skip connections pass everything across — useful detail and noise together. Attention gates sit in front of each skip connection and learn a weight between 0 and 1 for every pixel. Pixels relevant to what the decoder is currently building pass through strongly. Irrelevant pixels get suppressed. This is particularly helpful for detecting smaller objects like dogs that would otherwise get drowned out by background.
 
-### Building block — AttentionGate
-
-```
-  Skip (encoder)     Gating signal (decoder)
-       │                      │
-  Conv2d 1×1             Conv2d 1×1
-  BatchNorm               BatchNorm
-       └──────── ADD ─────────┘
-                  │
-                 ReLU → Conv2d 1×1 → BatchNorm → Sigmoid (0.0–1.0)
-                  │
-       skip × attention_map → attended skip → decoder
-```
-## 🏗️ How the Model Works
-
-The model looks at a photo and decides what every single pixel belongs to — not the photo 
-as a whole, but each pixel individually. To do this it uses an **Attention U-Net**, which 
-works in three stages.
-
----
-
-### The Encoder — understanding the scene
-
-The left side of the network takes the input photo and progressively shrinks it down.
-160×160 pixels becomes 80×80, then 40×40, all the way down to 10×10. At each step the
-image gets smaller but richer — the model is zooming out to understand the big picture.
-By the bottom it knows things like *"there is a vehicle in the upper right"* but has
-lost the fine detail about exact edges and shapes.
-
----
-
-### The Decoder — rebuilding the detail
-
-The right side works in reverse — it takes that compressed understanding and expands it
-back up to the original 160×160 size, gradually painting class labels onto every pixel.
-The problem is that zooming back in loses sharpness. To solve this, the encoder saves a
-copy of the image at each resolution level before shrinking it. When the decoder reaches
-that same resolution on the way back up, it receives that saved copy and uses it to
-sharpen its predictions. These are called **skip connections** — the horizontal arrows
-in the architecture diagram.
-
----
-
-### Attention Gates — focusing on what matters
-
-Standard skip connections pass everything across — useful detail and noise alike.
-**Attention gates** add a filter before each skip connection. They look at what the
-decoder is currently building and produce a map that highlights relevant pixels and
-suppresses irrelevant ones. When the model is trying to find a person, the gate
-brightens person-like regions and dims everything else. This is especially useful
-for small or partially hidden objects that would otherwise get ignored.
-
----
-
-### Inside each block
-
-Every level of the network is built from two convolutional layers back to back.
-Each one slides a 3×3 filter across the image asking *"does this patch look like an
-edge, a colour change, a texture?"* — hundreds of times simultaneously, each filter
-hunting for a different pattern. **Dropout** randomly switches off 10% of features
-during training, stopping the model from memorising the training images and forcing
-it to learn patterns that generalise to new photos.
-
-At the very end, a single layer maps everything to 3 scores per pixel — one per class.
-Whichever score is highest wins, and that is the final coloured mask.
 ### Model specifications
 
 | Parameter | Value |
@@ -353,11 +251,11 @@ Whichever score is highest wins, and that is the final coloured mask.
 | Encoder channels | `[64, 128, 256, 512]` |
 | Bottleneck channels | `1024` |
 | Input size | `160 × 160 × 3` |
-| Output size | `160 × 160 × 3` |
-| Total parameters | ~31 million |
+| Output size | `160 × 160 × 4` |
+| Total parameters | **31,388,396** |
 | Dropout (encoder) | `0.1` |
 | Dropout (bottleneck) | `0.2` |
-| Pretrained weights | **None** |
+| Pretrained weights | **None — trained from scratch** |
 
 ---
 
@@ -366,145 +264,164 @@ Whichever score is highest wins, and that is the final coloured mask.
 ```
   Platform  :  Google Colab
   GPU       :  NVIDIA Tesla T4  (16 GB VRAM)
-  Epochs    :  40  (early stopping patience = 12)
+  Epochs    :  60  (early stopping patience = 12)
   Batch     :  16 images per batch
 ```
 
-### Class-weighted loss — SegNet Median Frequency Balancing
+### Class weights — SegNet Median Frequency Balancing
+
+Because 78% of pixels are background, a naive model can just predict background everywhere and still look okay on paper. To stop this, we weight each class inversely to how common it is:
 
 ```
   freq[c]    =  pixels_of_class_c / total_pixels
-  median_f   =  median of all class frequencies
-  weight[c]  =  median_f / freq[c]   (capped at 10×, normalised)
+  median_f   =  median( freq[0], freq[1], freq[2], freq[3] )
+  weight[c]  =  median_f / freq[c]   (capped between 0.05 and 10)
 ```
 
-| Class | Frequency | Weight effect |
-|:---|:---:|:---|
-| Background | ~84% | Low — very common |
-| Vehicle | ~12% | Medium — reference |
-| Person | ~4% | High — rare, strongly penalised |
+The actual weights computed from our 2,000 training images:
 
-### Combined loss
+| Class | Frequency | Weight | Effect |
+|:---|:---:|:---:|:---|
+| Background | 78.015% | 0.0549 | Very low — background is easy |
+| Car | 16.612% | 0.2578 | Low-medium |
+| Dog | 3.675% | 1.1651 | High — rarely seen |
+| Airplane | 1.698% | 2.5222 | Highest — rarest class |
+
+Median frequency used: **10.144%**. A mistake on an Airplane pixel is penalised about 46x more than a Background pixel, forcing the model to actually learn rare classes instead of ignoring them.
+
+### Combined loss function
 
 ```
   Total Loss  =  0.5 × CrossEntropyLoss  +  0.5 × DiceLoss
 
   CrossEntropyLoss  →  per-pixel classification with class weights
-  DiceLoss          →  mask overlap quality, cleans up boundaries
+  DiceLoss          →  measures mask overlap, cleans up boundaries
 ```
 
 ### Learning rate schedule
 
 ```
-  Optimiser  :  AdamW   lr=1e-3   weight_decay=1e-4
+  Optimiser  :  AdamW   lr = 1e-3   weight_decay = 1e-4
   Scheduler  :  Linear warmup (epochs 0–5) + Cosine decay (epochs 5–60)
   Grad clip  :  max_norm = 1.0
+
+  LR
+  1e-3 ─────────╮
+                 ╲
+  warmup          ╲  cosine decay
+  0 ─────────╯    ╲──────────────► epoch
+  0           5                60
 ```
 
 ---
 
 ## 📊 Results
 
-### 1. Training Curve
-
-<!-- ============================================================
-     HOW TO ADD THIS IMAGE
-     1. In your GitHub repo click  Add file → Upload files
-     2. Upload  training_curve.png  into the  results/  folder
-     3. Delete this comment block — the image will appear below
-     ============================================================ -->
+### Training Curve
 
 ![Training Curve](results/training_curve.png)
 
-**Analysis:** Both train and validation loss decrease steadily across all 40 epochs.
-Notably, validation loss consistently sits *below* training loss — the opposite of
-overfitting — which means the model generalises well to unseen data. The warmup phase
-(epochs 0–5) stabilises early training and the cosine decay allows smooth convergence
-in later epochs. Validation loss is still declining at epoch 40, indicating further
-training would continue to improve performance.
+Both losses decrease consistently across all 60 epochs. The validation loss stays below the training loss throughout the entire run — this is a sign of good generalisation rather than overfitting. The warmup phase in epochs 0–5 stabilises the early training, and both curves continue declining smoothly all the way to epoch 60. The gap between train and val loss is healthy and stable, meaning the model learned general patterns rather than memorising training images.
 
 ---
 
-### 2. Sample Predictions
-
-<!-- ============================================================
-     HOW TO ADD THIS IMAGE
-     1. In your GitHub repo click  Add file → Upload files
-     2. Upload  sample_predictions.png  into the  results/  folder
-     3. Delete this comment block — the image will appear below
-     ============================================================ -->
+### Sample Predictions
 
 ![Sample Predictions](results/sample_predictions.png)
 
-**Analysis — row by row the image shows: original photo / ground truth mask / model prediction.**
-
-| Image | Scene | Ground Truth | Prediction | Verdict |
-|:---:|:---|:---|:---|:---:|
-| 1 | Person beside aircraft | Small purple person | Large orange blob over aircraft body | ❌ Aircraft mistaken for Vehicle |
-| 2 | Red fire truck | Large orange vehicle | Large orange blob, good shape | ✅ Strong Vehicle detection |
-| 3 | Person on motorbike mid-air | Tiny purple person | Mixed orange and purple blob | ⚠️ Person found but shape inaccurate |
-| 4 | Fire truck with person beside | Orange truck + purple person | Orange truck only, person missed | ⚠️ Vehicle good, Person missed |
-
-The model reliably detects vehicles with clean boundaries. Person detection works for
-isolated figures but struggles when persons are small, partially occluded, or adjacent
-to large vehicles — a known challenge in from-scratch segmentation with limited training data.
+Each group shows: original photo on top, correct ground truth mask in the middle, model prediction on the bottom. Dog segmentation is particularly strong — the model captures the shape cleanly. Cars produce good outlines. Airplanes work well when they are large in frame. Background sometimes bleeds into object boundaries, which is expected at 160×160 resolution where fine edges lose detail.
 
 ---
 
-### 3. Confusion Matrix
+### Confusion Matrix
 
-Each row represents the **true class**. Each column represents the **predicted class**.
-Each row sums to 1.00. The diagonal is correct predictions — higher is better.
+Each row is the **true class**. Each column is what the model **predicted**. Each row sums to 1.00. The diagonal is correct predictions — the brighter the better.
 
-| True \ Predicted | Background | Person | Vehicle |
-|:---:|:---:|:---:|:---:|
-| **Background** | **0.66** ✅ | 0.09 | 0.25 ⚠️ |
-| **Person** | 0.21 ⚠️ | **0.66** ✅ | 0.13 |
-| **Vehicle** | 0.10 | 0.05 | **0.84** ✅ |
+| True \ Predicted | Background | Car | Airplane | Dog |
+|:---:|:---:|:---:|:---:|:---:|
+| **Background** | **0.63** ✅ | 0.13 | 0.11 | 0.13 |
+| **Car** | 0.07 | **0.84** ✅ | 0.08 | 0.01 |
+| **Airplane** | 0.08 | 0.07 | **0.83** ✅ | 0.02 |
+| **Dog** | 0.04 | 0.02 | 0.02 | **0.92** ✅ |
 
-**Analysis:**
-- **Background (row 1):** Correctly identified 66% of the time. The main confusion is 25% of background pixels predicted as Vehicle — the model over-extends vehicle boundaries into surrounding road and wall regions.
-- **Person (row 2):** Correctly identified 66% of the time. 21% of person pixels are absorbed into Background — the model finds persons but loses them at the edges, explaining the low precision score.
-- **Vehicle (row 3):** The strongest performer at 84% correct. Only 10% leaks into Background and 5% into Person. Vehicle segmentation is the most reliable output of the model.
+**Reading the matrix:**
+
+- **Background (0.63):** The weakest diagonal. 37% of true background pixels are predicted as one of the three objects. This is the classic over-segmentation problem — the model finds objects in regions that are actually background. Most leakage goes equally to Car (0.13), Airplane (0.11), and Dog (0.13).
+
+- **Car (0.84):** Strong. Only 7% lost to Background and 8% confused with Airplane — which makes sense since both are large metal objects with similar textures.
+
+- **Airplane (0.83):** Strong. Slightly more confusion with Car (0.07) than expected, again because of shared visual texture between vehicles.
+
+- **Dog (0.92):** The best performing class. Only 4% lost to Background. Dogs have such a distinct organic shape that the model learned them most reliably despite being rare at 3.7% of pixels.
 
 ---
 
-### 4. Per-Class Metrics — 100 Unseen Test Images
+### Per-Class Metrics — 200 Unseen Test Images
 
-**Overall pixel accuracy: 69.29%**
+**Overall pixel accuracy: 69.22%**
 
 | Class | Precision | Recall | F1 Score | Support (pixels) |
 |:---|:---:|:---:|:---:|:---:|
-| Background | 0.9604 | 0.6616 | 0.7835 | 2,069,787 |
-| Person | 0.1364 | 0.6567 | 0.2259 | 49,132 |
-| Vehicle | 0.4147 | 0.8439 | 0.5561 | 441,081 |
-| **Macro avg** | **0.5038** | **0.7207** | **0.5218** | 2,560,000 |
-| Weighted avg | 0.8506 | 0.6929 | 0.7336 | 2,560,000 |
+| Background | 0.9702 | 0.6326 | 0.7658 | 3,864,680 |
+| Car | 0.3445 | 0.8427 | 0.4891 | 344,827 |
+| Airplane | 0.3791 | 0.8305 | 0.5206 | 332,913 |
+| Dog | 0.5178 | 0.9211 | 0.6629 | 577,580 |
+| **Macro avg** | **0.5529** | **0.8067** | **0.6096** | 5,120,000 |
+| Weighted avg | 0.8386 | 0.6922 | 0.7196 | 5,120,000 |
 
-**Prediction distribution on test set:**
+**What these numbers mean in plain English:**
 
-| Class | Predicted pixels | Share |
-|:---|:---:|:---:|
-| Background | 1,425,922 | 55.70% |
-| Person | 236,562 | 9.24% |
-| Vehicle | 897,516 | 35.06% |
+- **Background (F1 = 0.77):** Precision is extremely high at 0.97 — when the model says something is background, it is almost always right. But recall is only 0.63, meaning it misses 37% of true background pixels by labelling them as objects. The model is a bit trigger-happy with detecting objects in background regions.
 
-**Analysis per class:**
+- **Car (F1 = 0.49):** Recall is strong at 0.84 — the model finds most cars. But precision is only 0.34, meaning it also labels many non-car regions as car. Over-prediction rather than under-detection.
 
-- **Background — F1 0.78:** Very high precision (0.96) meaning almost every background prediction is correct. Lower recall (0.66) reflects the 25% bleed from the confusion matrix where background pixels get consumed by vehicle predictions.
+- **Airplane (F1 = 0.52):** Similar pattern to Car. Recall 0.83 means it rarely misses a plane. Low precision 0.38 means it sometimes assigns the plane label to regions that are actually background or car — likely because it has the least training data at 1.7% of pixels.
 
-- **Person — F1 0.23:** Good recall (0.66) means the model finds most persons. Very low precision (0.14) means it also produces many false positives — labelling non-person regions (walls, poles, aircraft bodies) as Person. This is the model's primary weakness and stems from the class being only 4% of training pixels despite a high class weight.
+- **Dog (F1 = 0.66):** Best foreground class. Recall 0.92 is excellent — the model finds almost every dog. Precision 0.52 means some false positives, but the overall balance is the best of the three object classes.
 
-- **Vehicle — F1 0.56:** Excellent recall (0.84) confirms the model reliably detects vehicles. Moderate precision (0.41) reflects the over-prediction of vehicle boundaries into surrounding background areas. The strongest overall class in the model.
-
-> **Context:** This model was trained entirely from scratch with no pretrained weights on only
-> 1,000 images. A macro F1 of 0.52 and 69% pixel accuracy under these constraints represents
-> a solid baseline. With pretrained encoder weights or more training data, Person precision
-> and overall accuracy would improve substantially.
+> **Context:** This model was trained entirely from scratch with zero pretrained weights on 2,000 images. A macro F1 of 0.61 and 69% pixel accuracy is a solid result under these constraints. The dominant pattern across all classes is strong recall with weaker precision — the model is good at finding objects but sometimes finds them where they aren't. Using pretrained encoder weights would significantly improve precision.
 
 ---
 
+## 📁 Project Structure
 
+```
+segmentation_project_v2/                 (Google Drive root)
+│
+├── 📂 data/
+│   ├── 📂 train/
+│   │   ├── 📂 images/                   ← 2,000 training photos (.jpg)
+│   │   └── 📂 masks/                    ← 2,000 label maps (.png)
+│   │                                       pixel value: 0=bg 1=car 2=plane 3=dog
+│   └── 📂 test/
+│       ├── 📂 images/                   ← 200 test photos (.jpg)
+│       └── 📂 masks/                    ← 200 label maps (.png)
+│
+├── 📂 results/
+│   ├── best_model_v2.pth                ← best checkpoint (~120 MB)
+│   ├── evaluation_results.txt           ← precision / recall / F1
+│   ├── training_curve.png               ← loss over 60 epochs
+│   ├── confusion_matrix.png             ← normalised per-class confusion
+│   ├── sample_predictions.png           ← photo / truth / prediction
+│   └── data_check.png                   ← data sanity check
+│
+└── 📓 segmentation_notebook.ipynb
+    ├── Cell 1   Install + mount Drive + GPU check
+    ├── Cell 2   All constants and settings
+    ├── Cell 3   Download from OpenImages via FiftyOne
+    ├── Cell 4   Visual data check
+    ├── Cell 5   AttentionUNet model definition
+    ├── Cell 6   Dataset + class weights + combined loss
+    ├── Cell 7A  Copy Drive data to local SSD
+    ├── Cell 7B  Create DataLoaders
+    ├── Cell 7C  Training loop with early stopping
+    ├── Cell 8   Plot training curve
+    ├── Cell 9   Evaluate on 200 test images
+    ├── Cell 10  Confusion matrix + visual predictions
+    └── Cell 11  Drive file summary
+```
+
+---
 
 ## 🔑 Key Design Decisions
 
@@ -512,29 +429,29 @@ Each row sums to 1.00. The diagonal is correct predictions — higher is better.
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  DECISION             │  CHOICE                 │  REASON                │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Architecture         │  Attention U-Net         │  Purpose-built for     │
-│                       │                          │  segmentation — skip   │
-│                       │                          │  connections preserve  │
-│                       │                          │  fine spatial detail   │
+│  Classes chosen       │  Car, Airplane, Dog      │  Visually maximally    │
+│                       │                          │  distinct — no         │
+│                       │                          │  overlap in shape      │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Pretrained weights   │  None — from scratch     │  Assignment constraint │
+│  Architecture         │  Attention U-Net         │  Built for segmentation│
+│                       │                          │  skip connections keep │
+│                       │                          │  spatial detail        │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Car vs Truck         │  Merged → Vehicle        │  90% visual overlap    │
-│                       │                          │  causes confusion on   │
-│                       │                          │  limited data          │
+│  Pretrained weights   │  None — from scratch     │  Academic constraint   │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Loss function        │  CE + Dice  (50/50)      │  CE: pixel accuracy    │
-│                       │                          │  Dice: mask overlap    │
+│  Loss function        │  CE + Dice  (50/50)      │  CE: per-pixel acc     │
+│                       │                          │  Dice: shape overlap   │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Class weighting      │  SegNet median           │  Prevents background   │
-│                       │  frequency formula        │  dominance (84% px)   │
+│  Class weighting      │  SegNet median freq      │  78% background would  │
+│                       │                          │  dominate without it   │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
 │  LR schedule          │  Warmup + cosine decay   │  Stable early training │
-│                       │                          │  smooth convergence    │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Data storage         │  Drive → SSD copy        │  50× faster reads      │
+│  Data storage         │  Drive → SSD copy        │  50x faster reads      │
+│                       │  at session start        │  per training epoch    │
 ├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Early stopping       │  Patience = 12           │  Saves best weights    │
+│  Early stopping       │  Patience = 12           │  Saves best checkpoint │
+│                       │                          │  prevents overfitting  │
 └───────────────────────┴─────────────────────────┴────────────────────────┘
 ```
 
@@ -551,7 +468,7 @@ Each row sums to 1.00. The diagonal is correct predictions — higher is better.
 | **Pillow** | Image loading, resizing, mask conversion |
 | **NumPy** | Array operations, mask manipulation |
 | **scikit-learn** | Precision, recall, F1, confusion matrix |
-| **Matplotlib** | Training curves, visualisations |
+| **Matplotlib** | Training curves and visualisations |
 | **Google Colab** | Cloud GPU notebook (Tesla T4) |
 | **Google Drive** | Persistent data and model storage |
 
