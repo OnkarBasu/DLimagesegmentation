@@ -1,493 +1,264 @@
-# 🧠 Image Segmentation with Attention U-Net
+# Image Segmentation: Car / Airplane / Dog
 
-<div align="center">
+A PyTorch image segmentation project that takes a photo and labels every pixel as one of four classes: **Background**, **Car**, **Airplane**, or **Dog**.
 
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)
-![OpenImages](https://img.shields.io/badge/Dataset-OpenImages_v7-34A853?style=for-the-badge&logoColor=white)
-![Colab](https://img.shields.io/badge/Platform-Google_Colab-F9AB00?style=for-the-badge&logo=googlecolab&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-8A2BE2?style=for-the-badge)
+Two models are trained and compared head-to-head on the same data:
 
-**Pixel-level image segmentation of real-world photos built entirely from scratch using PyTorch.**
-Every pixel in a photo gets labelled as one of four classes — no pretrained weights, no shortcuts.
-Trained on Google OpenImages v7 using a custom Attention U-Net on a single GPU.
+1. **U-Net with a pretrained ResNet34 encoder + custom decoder** (main model)
+2. **Vanilla U-Net** trained from scratch (Ronneberger 2015 — fair baseline)
 
-</div>
+Built as a defense-ready project for an MSc Data Science course at Vilnius University.
 
 ---
 
-## 📋 Table of Contents
+## Headline result
 
-- [What This Project Does](#-what-this-project-does)
-- [Classes and Labels](#-classes-and-labels)
-- [Dataset](#-dataset--openimages-v7)
-- [Data Pipeline](#-data-pipeline)
-- [How the Model Works](#-how-the-model-works)
-- [Training Setup](#-training-setup)
-- [Results](#-results)
-- [Project Structure](#-project-structure)
-- [Key Design Decisions](#-key-design-decisions)
-- [Technology Stack](#-technology-stack)
-- [References](#-references)
+| Model | Macro F1 | Pixel accuracy |
+|---|---|---|
+| **ResNet34 + custom decoder** | **0.7658** | **84.19%** |
+| Vanilla U-Net | 0.7221 | 81.19% |
+| **Improvement** | **+0.0437** | **+3.00%** |
+
+The pretrained encoder wins on every single class. Detailed comparison below.
 
 ---
 
-## 🎯 What This Project Does
+## Dataset
 
-Given any photo, the model colours every single pixel according to what it belongs to. Not just a bounding box around an object — every pixel gets its own label. This is called **semantic segmentation**.
+- **Source:** OpenImages v7 (Google), pulled via FiftyOne
+- **Classes:** Car, Airplane, Dog (+ Background)
+- **Train:** 4000 images with segmentation masks
+- **Test:** 2000 images, never seen during training
+- **Resolution:** Resized to 224×224 for both training and evaluation
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                                                                      │
-│   INPUT                              OUTPUT                          │
-│                                                                      │
-│   Any street or outdoor photo  →     Pixel-level coloured mask       │
-│                                                                      │
-│   [dog in park]                →     ░░░░░░░░░░░░░░░░░░ Background   │
-│   [car on road]                →     ████████████████ Car            │
-│   [plane in sky]               →     ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓ Airplane      │
-│   [dog running]                →     ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒ Dog           │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
-```
+### Pixel distribution (training set)
 
-A 160×160 image requires 25,600 individual pixel-level decisions per forward pass. The model makes all of them in one shot.
+| Class | Pixels | Share |
+|---|---|---|
+| Background | 2.35B | 77.97% |
+| Car | 499M | 16.60% |
+| Airplane | 54M | 1.80% |
+| Dog | 109M | 3.63% |
+
+The dataset is **severely imbalanced** — Background dominates, Airplane is rare. This drove most of our loss-function design choices (see Class imbalance section below).
 
 ---
 
-## 🏷️ Classes and Labels
+## Architecture
 
-The model segments images into **4 classes**. Each class has a fixed integer index stored as the pixel value in the label map and a unique colour for visualisation.
+### Model 1 — Pretrained ResNet34 encoder + custom decoder
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                         CLASS DEFINITIONS                              │
-├───────────┬──────────────┬──────────────────┬─────────────────────────┤
-│   Index   │  Class Name  │  Mask Colour     │  What it covers         │
-├───────────┼──────────────┼──────────────────┼─────────────────────────┤
-│     0     │  Background  │  Gray            │  Road, sky, grass,      │
-│           │              │  RGB(100,100,100)│  buildings, anything    │
-│           │              │                  │  not in the 3 classes   │
-├───────────┼──────────────┼──────────────────┼─────────────────────────┤
-│     1     │  Car         │  Orange          │  Cars of any kind,      │
-│           │              │  RGB(216, 90, 48)│  any angle, any size    │
-├───────────┼──────────────┼──────────────────┼─────────────────────────┤
-│     2     │  Airplane    │  Blue            │  Aircraft — commercial, │
-│           │              │  RGB(66, 133,244)│  military, any type     │
-├───────────┼──────────────┼──────────────────┼─────────────────────────┤
-│     3     │  Dog         │  Green           │  Any dog breed,         │
-│           │              │  RGB(52, 168, 83)│  full or partial body   │
-└───────────┴──────────────┴──────────────────┴─────────────────────────┘
-```
+The U-shape of U-Net with one half borrowed from ImageNet:
 
-> **Why these three classes?**
-> Car, Airplane, and Dog are visually about as different from each other as you can get — completely different shapes, sizes, textures, and contexts. A dog looks nothing like a plane. A plane looks nothing like a car. This makes them easier for a from-scratch model to separate cleanly, which leads to better training signal and more interpretable results.
+- **Encoder:** ResNet34 pretrained on ImageNet, loaded from `torchvision`. About 21M parameters, all initialized from years of ImageNet training so it already knows edges, textures, fur, metal, sky.
+- **Decoder:** Written from scratch in this notebook. Four `UpBlock` modules (each: `ConvTranspose2d` upsample → concat skip connection → DoubleConv) plus a final upsample + 1×1 conv to produce 4-class logits. About 5M parameters.
+- **Skip connections:** Tap ResNet34 at five depth levels (after `conv1`, `layer1`, `layer2`, `layer3`, `layer4`) and feed those features into matching decoder levels.
+- **Total:** ~26M parameters
+
+### Model 2 — Vanilla U-Net (baseline for Q13)
+
+A clean reimplementation of the original 2015 U-Net paper, no pretrained weights anywhere:
+
+- 4 encoder blocks: features `[64, 128, 256, 512]`
+- Bottleneck: doubles to 1024 channels
+- 4 decoder blocks (transposed conv upsampling + skip concat + DoubleConv)
+- Final 1×1 conv to 4 output classes
+- **Total:** ~31M parameters (heavier decoder than ResNet34's)
+
+Both models share **everything else**: training data, image size, loss, class weights, augmentations, optimizer. Any difference in F1 is attributable to architecture/pretraining.
 
 ---
 
-## 📦 Dataset — OpenImages v7
+## Augmentations
 
-**Google OpenImages v7** is one of the largest publicly available image datasets, with around 9 million photos annotated by professional human labellers.
+Applied to **training only**. Test images are just resized and normalized.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    OPENIMAGES V7 — KEY FACTS                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Total images              │  ~9 million                        │
-│  Segmentation masks        │  2.8 million objects               │
-│  Segmentation classes      │  350 classes                       │
-│  Licence                   │  CC BY 4.0 (free for any use)      │
-│  Download tool             │  FiftyOne Python library           │
-└─────────────────────────────────────────────────────────────────┘
-```
+| Augmentation | Probability | Why |
+|---|---|---|
+| Resize 224×224 | always | Required for ImageNet pretrained encoder |
+| Horizontal flip | 0.5 | Cars/planes/dogs look natural mirrored — doubles effective dataset size |
+| Color jitter | 0.4 | Brightness, contrast, saturation, hue — robustness to lighting and cameras |
+| Gaussian blur | 0.2 | Robustness to slightly out-of-focus images |
+| ImageNet normalization | always | Required so input matches ResNet34's pretraining distribution |
 
-### Splits used
-
-| Split | Purpose | Count |
-|:---:|:---:|:---:|
-| `train` | Teaching the model | 2,000 images |
-| `test` | Final evaluation only — never seen during training | 200 images |
-
-### Pixel distribution in training data
-
-After downloading and converting masks, here is how pixels are distributed across the 2,000 training images:
-
-| Class | Total Pixels | Frequency | Class Weight |
-|:---|:---:|:---:|:---:|
-| Background | 1,172,840,490 | 78.015% | 0.0549 |
-| Car | 249,743,505 | 16.612% | 0.2578 |
-| Dog | 55,249,821 | 3.675% | 1.1651 |
-| Airplane | 25,522,600 | 1.698% | 2.5222 |
-
-Background dominates at 78% which is expected — most of any photo is not a car, plane, or dog. This imbalance is handled through **median frequency class weighting** (explained in Training Setup).
+**Deliberately removed:** vertical flip and 90° rotation — upside-down cars and planes don't occur in real photos, and adding them would teach the model unnatural orientations.
 
 ---
 
-## 🔄 Data Pipeline
+## Class imbalance handling
+
+Background takes up ~78% of all pixels. Without correction, a model that just predicts "Background everywhere" scores 78% pixel accuracy and never learns the rare classes at all.
+
+Two techniques applied together:
+
+### 1. Square-root inverse-frequency class weights in CrossEntropy
+
+Standard inverse-frequency weights over-correct: rare classes get weight ~50×, the model over-predicts foreground, and Background recall collapses (we hit this exact problem in an earlier run — Background recall fell to 0.63).
+
+Square-root inverse-frequency is gentler:
 
 ```
-╔══════════════════════════════════════════════════════════════════╗
-║                        DATA PIPELINE                            ║
-╚══════════════════════════════════════════════════════════════════╝
-
-STEP 1 — DOWNLOAD
-┌──────────────────────────────────────────────────────────────────┐
-│  FiftyOne connects to OpenImages v7                              │
-│  Downloads only photos containing Car, Airplane, or Dog          │
-│  2,000 training images  +  200 test images                       │
-│  Each image comes with per-instance binary mask PNGs             │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 2 — MASK CONVERSION
-┌──────────────────────────────────────────────────────────────────┐
-│  OpenImages gives one black/white PNG per object instance        │
-│  We merge all instances into one single label map per photo      │
-│                                                                  │
-│  For each object detected:                                       │
-│    1. Read bounding box coordinates (normalised 0–1)             │
-│    2. Convert to pixel coordinates using image size              │
-│    3. Resize binary mask to match bounding box pixels            │
-│    4. Paint class index into label map at that location          │
-│                                                                  │
-│  Saved as PNG — pixel value = class index (0, 1, 2, or 3)       │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 3 — SAVE TO GOOGLE DRIVE
-┌──────────────────────────────────────────────────────────────────┐
-│  segmentation_project_v2/data/train/images/  ← 2,000 photos     │
-│  segmentation_project_v2/data/train/masks/   ← 2,000 label maps │
-│  segmentation_project_v2/data/test/images/   ←   200 photos     │
-│  segmentation_project_v2/data/test/masks/    ←   200 label maps │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 4 — AUGMENTATION  (training split only)
-┌──────────────────────────────────────────────────────────────────┐
-│  Transform              │  Probability  │  Effect                │
-│  ───────────────────────┼───────────────┼──────────────────────  │
-│  Horizontal flip        │  0.50         │  Mirror left/right     │
-│  Vertical flip          │  0.10         │  Mirror up/down        │
-│  Random 90° rotation    │  0.20         │  Rotate                │
-│  Colour jitter          │  0.40         │  Vary brightness       │
-│  Gaussian blur          │  0.20         │  Slight blur           │
-│  ImageNet normalise     │  1.00         │  Always applied        │
-│                                                                  │
-│  Spatial transforms applied to image AND mask in sync            │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 5 — COPY TO LOCAL SSD  (once per Colab session)
-┌──────────────────────────────────────────────────────────────────┐
-│  Google Drive (~10 MB/s)  →  Local SSD (~500 MB/s)               │
-│  One-time copy at session start — all training reads from SSD    │
-└──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           ▼
-STEP 6 — PYTORCH DATALOADER
-┌──────────────────────────────────────────────────────────────────┐
-│  batch_size=16  │  num_workers=2  │  pin_memory=True             │
-│  shuffle=True (train)  │  shuffle=False (test)                   │
-└──────────────────────────────────────────────────────────────────┘
+weight_class = sqrt(median_freq / freq_class)
 ```
+
+Final weights: Background 0.28, Car 0.60, Airplane 1.83, Dog 1.29. Balanced — no class is ignored, no class dominates.
+
+### 2. Dice loss combined 50/50 with CE
+
+Dice loss measures region overlap rather than per-pixel correctness. It naturally handles imbalance because each class contributes equally regardless of pixel count.
+
+```
+total_loss = 0.5 × CrossEntropy(weights) + 0.5 × Dice
+```
+
+CE provides per-pixel gradients (good for fine boundaries). Dice provides region-level signal (good for under-represented classes). The combination outperforms either alone.
 
 ---
 
-## 🏗️ How the Model Works
+## Training setup
 
-The model is an **Attention U-Net** — a U-shaped encoder-decoder network with attention gates at every skip connection. Everything was written from scratch in PyTorch with no pretrained weights.
+| Component | Value | Why |
+|---|---|---|
+| Optimizer | AdamW | Handles sparse segmentation gradients well |
+| Learning rate | 1e-3 | Standard starting point for AdamW with cosine decay |
+| Weight decay | 1e-4 | Mild regularization without distorting pretrained features |
+| Batch size | 8 | Fits 224×224 + ResNet34 on Colab T4/L4 |
+| LR schedule | Cosine decay with 5-epoch warmup | Gentle ramp at start, smooth decay to zero |
+| Mixed precision | AMP (autocast + GradScaler) | ~2× speedup on T4/L4, negligible accuracy cost |
+| Gradient clipping | max_norm=1.0 | Prevents loss spikes |
+| Encoder freeze | First 3 epochs | Decoder adapts to pretrained features without disturbing them |
+| LR halved on unfreeze | 1e-3 → 5e-4 | Gentler fine-tuning of the encoder |
 
-### The big picture
+### Training duration
 
-The encoder shrinks the image progressively — 160×160 → 80×80 → 40×40 → 20×20 → 10×10 — learning increasingly abstract features at each step. The decoder expands it back up to the original size, painting class labels as it goes. Skip connections pass fine-grained detail from the encoder to the decoder at each resolution level so boundaries stay sharp.
+- **ResNet34 + custom decoder:** Trained for 11 epochs (early stopping triggered after the encoder unfreeze caused a temporary loss spike. Investigation and fix: reset patience counter on unfreeze, halve LR on unfreeze, increase patience from 8 to 12 — final run completed cleanly).
+- **Vanilla U-Net:** Trained for full 30 epochs without early stopping. No pretrained weights to protect, so it converges more slowly.
 
-```
-╔══════════════════════════════════════════════════════════════════════╗
-║                        ATTENTION U-NET                              ║
-║  INPUT  (batch, 3, 160, 160)  — RGB photo                           ║
-╚══════════════════════════════════════════════════════════════════════╝
-
-  ENCODER (left — shrinks)              DECODER (right — grows)
-
-  ┌─────────────────┐                       ┌─────────────────┐
-  │  DoubleConv     │                       │  DoubleConv     │
-  │  3 → 64 ch      │──── AttentionGate ───►│  128 → 64 ch    │
-  │  160 × 160      │                       │  160 × 160      │
-  └────────┬────────┘                       └────────▲────────┘
-           │  MaxPool (÷2)                           │  ConvTranspose (×2)
-  ┌─────────────────┐                       ┌─────────────────┐
-  │  DoubleConv     │                       │  DoubleConv     │
-  │  64 → 128 ch    │──── AttentionGate ───►│  256 → 128 ch   │
-  │  80 × 80        │                       │  80 × 80        │
-  └────────┬────────┘                       └────────▲────────┘
-           │  MaxPool (÷2)                           │  ConvTranspose (×2)
-  ┌─────────────────┐                       ┌─────────────────┐
-  │  DoubleConv     │                       │  DoubleConv     │
-  │  128 → 256 ch   │──── AttentionGate ───►│  512 → 256 ch   │
-  │  40 × 40        │                       │  40 × 40        │
-  └────────┬────────┘                       └────────▲────────┘
-           │  MaxPool (÷2)                           │  ConvTranspose (×2)
-  ┌─────────────────┐                       ┌─────────────────┐
-  │  DoubleConv     │                       │  DoubleConv     │
-  │  256 → 512 ch   │──── AttentionGate ───►│  1024 → 512 ch  │
-  │  20 × 20        │                       │  20 × 20        │
-  └────────┬────────┘                       └────────▲────────┘
-           └──────────────► BOTTLENECK ──────────────┘
-                            512 → 1024 ch  │  10 × 10
-
-  OUTPUT  (batch, 4, 160, 160) — argmax → one class per pixel
-```
-
-### What attention gates actually do
-
-Standard skip connections pass everything across — useful detail and noise together. Attention gates sit in front of each skip connection and learn a weight between 0 and 1 for every pixel. Pixels relevant to what the decoder is currently building pass through strongly. Irrelevant pixels get suppressed. This is particularly helpful for detecting smaller objects like dogs that would otherwise get drowned out by background.
-
-### Model specifications
-
-| Parameter | Value |
-|:---|:---|
-| Architecture | Attention U-Net |
-| Encoder channels | `[64, 128, 256, 512]` |
-| Bottleneck channels | `1024` |
-| Input size | `160 × 160 × 3` |
-| Output size | `160 × 160 × 4` |
-| Total parameters | **31,388,396** |
-| Dropout (encoder) | `0.1` |
-| Dropout (bottleneck) | `0.2` |
-| Pretrained weights | **None — trained from scratch** |
+Total training time: ~70 minutes on a single Colab T4 GPU.
 
 ---
 
-## ⚙️ Training Setup
+## Results
+
+### ResNet34 + custom decoder — full metrics on 2000 test images
+
+| Class | Precision | Recall | F1 | Support |
+|---|---|---|---|---|
+| Background | 0.9699 | 0.8192 | **0.8882** | 75.97M |
+| Car | 0.4765 | 0.9397 | **0.6324** | 7.34M |
+| Airplane | 0.6091 | 0.8556 | **0.7116** | 5.23M |
+| Dog | 0.7571 | 0.9206 | **0.8309** | 11.81M |
+| **Macro avg** | 0.7032 | 0.8838 | **0.7658** | — |
+| **Weighted avg** | 0.8900 | 0.8419 | 0.8536 | — |
+
+**Overall pixel accuracy: 84.19%**
+
+### Vanilla U-Net — same test set
+
+| Class | Precision | Recall | F1 |
+|---|---|---|---|
+| Background | 0.9519 | 0.7983 | 0.8684 |
+| Car | 0.4381 | 0.8831 | 0.5856 |
+| Airplane | 0.5861 | 0.7640 | 0.6633 |
+| Dog | 0.6887 | 0.8758 | 0.7710 |
+| **Macro avg** | 0.6662 | 0.8303 | **0.7221** |
+
+**Overall pixel accuracy: 81.19%**
+
+### Q13 — Side-by-side comparison
+
+| Class | Vanilla F1 | ResNet34 F1 | Δ |
+|---|---|---|---|
+| Background | 0.8684 | 0.8882 | **+0.0198** |
+| Car | 0.5856 | 0.6324 | **+0.0468** |
+| Airplane | 0.6633 | 0.7116 | **+0.0483** |
+| Dog | 0.7710 | 0.8309 | **+0.0598** |
+| **Macro F1** | **0.7221** | **0.7658** | **+0.0437** |
+| Pixel accuracy | 81.19% | 84.19% | +3.00% |
+
+The pretrained ResNet34 wins on every class, with the biggest gains on the rarer/harder classes (Dog and Airplane). The improvement is real but modest — at 4000 training images, vanilla U-Net has enough data to learn its own features and almost catch up. We expect this gap to widen significantly in low-data regimes (under 500 images per class).
+
+---
+
+## Repository structure
 
 ```
-  Platform  :  Google Colab
-  GPU       :  NVIDIA Tesla T4  (16 GB VRAM)
-  Epochs    :  60  (early stopping patience = 12)
-  Batch     :  16 images per batch
-```
-
-### Class weights — SegNet Median Frequency Balancing
-
-Because 78% of pixels are background, a naive model can just predict background everywhere and still look okay on paper. To stop this, we weight each class inversely to how common it is:
-
-```
-  freq[c]    =  pixels_of_class_c / total_pixels
-  median_f   =  median( freq[0], freq[1], freq[2], freq[3] )
-  weight[c]  =  median_f / freq[c]   (capped between 0.05 and 10)
-```
-
-The actual weights computed from our 2,000 training images:
-
-| Class | Frequency | Weight | Effect |
-|:---|:---:|:---:|:---|
-| Background | 78.015% | 0.0549 | Very low — background is easy |
-| Car | 16.612% | 0.2578 | Low-medium |
-| Dog | 3.675% | 1.1651 | High — rarely seen |
-| Airplane | 1.698% | 2.5222 | Highest — rarest class |
-
-Median frequency used: **10.144%**. A mistake on an Airplane pixel is penalised about 46x more than a Background pixel, forcing the model to actually learn rare classes instead of ignoring them.
-
-### Combined loss function
-
-```
-  Total Loss  =  0.5 × CrossEntropyLoss  +  0.5 × DiceLoss
-
-  CrossEntropyLoss  →  per-pixel classification with class weights
-  DiceLoss          →  measures mask overlap, cleans up boundaries
-```
-
-### Learning rate schedule
-
-```
-  Optimiser  :  AdamW   lr = 1e-3   weight_decay = 1e-4
-  Scheduler  :  Linear warmup (epochs 0–5) + Cosine decay (epochs 5–60)
-  Grad clip  :  max_norm = 1.0
-
-  LR
-  1e-3 ─────────╮
-                 ╲
-  warmup          ╲  cosine decay
-  0 ─────────╯    ╲──────────────► epoch
-  0           5                60
+segmentation_project_v3/
+├── data/
+│   ├── train/     (4000 images + masks)
+│   └── test/      (2000 images + masks)
+├── models/
+│   ├── best_resnet34.pth        ← main model
+│   └── best_vanilla_unet.pth    ← Q13 baseline
+└── results/
+    ├── data_check.png
+    ├── pixel_distribution.txt
+    ├── training_curves_comparison.png
+    ├── confusion_matrix_resnet34.png
+    ├── confusion_matrix_vanilla.png
+    ├── sample_predictions_resnet34.png
+    ├── pixel_pipeline_demo.png
+    ├── evaluation_resnet34.txt
+    ├── evaluation_vanilla.txt
+    ├── comparison_table.txt
+    ├── sanity_check_predictions.png    (Q3)
+    └── internet_image_predictions.png  (Q1)
 ```
 
 ---
 
-## 📊 Results
+## How to run
 
-### Training Curve
+The notebook is built for Google Colab with a GPU runtime (T4 or better).
 
-![Training Curve](results/vizy.png)
+1. Open the notebook in Colab
+2. Run cells 1–7 to install, mount Drive, download data, build models
+3. Run cells 8–14 to train both models and evaluate
+4. Run cells 15–18 for the defense demos (pixel pipeline, internet images, sanity checks)
+5. Cell 22 is a standalone inference block — paste it into any new Colab to use the trained model on a new image without re-running everything
 
-Both losses decrease consistently across all 60 epochs. The validation loss stays below the training loss throughout the entire run — this is a sign of good generalisation rather than overfitting. The warmup phase in epochs 0–5 stabilises the early training, and both curves continue declining smoothly all the way to epoch 60. The gap between train and val loss is healthy and stable, meaning the model learned general patterns rather than memorising training images.
-
----
-
-### Sample Predictions
-
-![Sample Predictions](results/sample.png)
-
-Each group shows: original photo on top, correct ground truth mask in the middle, model prediction on the bottom. Dog segmentation is particularly strong — the model captures the shape cleanly. Cars produce good outlines. Airplanes work well when they are large in frame. Background sometimes bleeds into object boundaries, which is expected at 160×160 resolution where fine edges lose detail.
+End-to-end runtime: ~90 minutes including data download.
 
 ---
 
-### Confusion Matrix
+## Defense demonstrations
 
-Each row is the **true class**. Each column is what the model **predicted**. Each row sums to 1.00. The diagonal is correct predictions — the brighter the better.
+The notebook is structured around 15 defense questions covering data, model, training, metrics, and edge cases:
 
-| True \ Predicted | Background | Car | Airplane | Dog |
-|:---:|:---:|:---:|:---:|:---:|
-| **Background** | **0.63** ✅ | 0.13 | 0.11 | 0.13 |
-| **Car** | 0.07 | **0.84** ✅ | 0.08 | 0.01 |
-| **Airplane** | 0.08 | 0.07 | **0.83** ✅ | 0.02 |
-| **Dog** | 0.04 | 0.02 | 0.02 | **0.92** ✅ |
+- **Q1** — Internet image predictions
+- **Q3** — Behavior on multi-object images, no-object images, and random pixel noise
+- **Q4–Q6** — Pixel-level pipeline walkthrough at pixel (123, 123): logits → softmax → argmax
+- **Q7** — Six metrics on 2000 unseen test images
+- **Q8, Q12** — Training duration, stopping criteria, loss + accuracy curves
+- **Q9** — Augmentation rationale
+- **Q10–Q11** — Architecture and optimizer choices
+- **Q13** — Vanilla U-Net comparison (above)
+- **Q14** — Next steps to improve
+- **Q15** — Class imbalance handling (above)
 
-**Reading the matrix:**
-
-- **Background (0.63):** The weakest diagonal. 37% of true background pixels are predicted as one of the three objects. This is the classic over-segmentation problem — the model finds objects in regions that are actually background. Most leakage goes equally to Car (0.13), Airplane (0.11), and Dog (0.13).
-
-- **Car (0.84):** Strong. Only 7% lost to Background and 8% confused with Airplane — which makes sense since both are large metal objects with similar textures.
-
-- **Airplane (0.83):** Strong. Slightly more confusion with Car (0.07) than expected, again because of shared visual texture between vehicles.
-
-- **Dog (0.92):** The best performing class. Only 4% lost to Background. Dogs have such a distinct organic shape that the model learned them most reliably despite being rare at 3.7% of pixels.
+Each question has a dedicated markdown cell explaining the reasoning, followed by a code cell demonstrating it.
 
 ---
 
-### Per-Class Metrics — 200 Unseen Test Images
+## Next steps
 
-**Overall pixel accuracy: 69.22%**
+Concrete things that would push macro F1 from 0.77 toward 0.82+:
 
-| Class | Precision | Recall | F1 Score | Support (pixels) |
-|:---|:---:|:---:|:---:|:---:|
-| Background | 0.9702 | 0.6326 | 0.7658 | 3,864,680 |
-| Car | 0.3445 | 0.8427 | 0.4891 | 344,827 |
-| Airplane | 0.3791 | 0.8305 | 0.5206 | 332,913 |
-| Dog | 0.5178 | 0.9211 | 0.6629 | 577,580 |
-| **Macro avg** | **0.5529** | **0.8067** | **0.6096** | 5,120,000 |
-| Weighted avg | 0.8386 | 0.6922 | 0.7196 | 5,120,000 |
+1. **Larger encoder** — ResNet50 or EfficientNet-B3. Expected gain: +0.03–0.05 macro F1.
+2. **Higher input resolution** — 224 → 384. Helps small objects (especially Airplane). Expected gain: +0.03–0.05.
+3. **More Car training data** — Car F1 of 0.63 is the bottleneck. The Car class has the most visual ambiguity (cars on roads, parked overlapping, partial occlusions) and would benefit most from more diverse examples.
+4. **Test-time augmentation** — Average predictions on image + horizontal flip. Cheap +0.01–0.02.
+5. **Focal loss** — Replace weighted CE. Better at handling "easy background" pixels.
 
-**What these numbers mean in plain English:**
-
-- **Background (F1 = 0.77):** Precision is extremely high at 0.97 — when the model says something is background, it is almost always right. But recall is only 0.63, meaning it misses 37% of true background pixels by labelling them as objects. The model is a bit trigger-happy with detecting objects in background regions.
-
-- **Car (F1 = 0.49):** Recall is strong at 0.84 — the model finds most cars. But precision is only 0.34, meaning it also labels many non-car regions as car. Over-prediction rather than under-detection.
-
-- **Airplane (F1 = 0.52):** Similar pattern to Car. Recall 0.83 means it rarely misses a plane. Low precision 0.38 means it sometimes assigns the plane label to regions that are actually background or car — likely because it has the least training data at 1.7% of pixels.
-
-- **Dog (F1 = 0.66):** Best foreground class. Recall 0.92 is excellent — the model finds almost every dog. Precision 0.52 means some false positives, but the overall balance is the best of the three object classes.
-
-> **Context:** This model was trained entirely from scratch with zero pretrained weights on 2,000 images. A macro F1 of 0.61 and 69% pixel accuracy is a solid result under these constraints. The dominant pattern across all classes is strong recall with weaker precision — the model is good at finding objects but sometimes finds them where they aren't. Using pretrained encoder weights would significantly improve precision.
+The realistic ceiling on this exact dataset is probably around 0.80–0.82 macro F1. Past that, the bottleneck becomes the quality of OpenImages segmentation masks themselves.
 
 ---
 
-## 📁 Project Structure
+## Tech stack
 
-```
-segmentation_project_v2/                 (Google Drive root)
-│
-├── 📂 data/
-│   ├── 📂 train/
-│   │   ├── 📂 images/                   ← 2,000 training photos (.jpg)
-│   │   └── 📂 masks/                    ← 2,000 label maps (.png)
-│   │                                       pixel value: 0=bg 1=car 2=plane 3=dog
-│   └── 📂 test/
-│       ├── 📂 images/                   ← 200 test photos (.jpg)
-│       └── 📂 masks/                    ← 200 label maps (.png)
-│
-├── 📂 results/
-│   ├── best_model_v2.pth                ← best checkpoint (~120 MB)
-│   ├── evaluation_results.txt           ← precision / recall / F1
-│   ├── training_curve.png               ← loss over 60 epochs
-│   ├── confusion_matrix.png             ← normalised per-class confusion
-│   ├── sample_predictions.png           ← photo / truth / prediction
-│   └── data_check.png                   ← data sanity check
-│
-└── 📓 segmentation_notebook.ipynb
-    ├── Cell 1   Install + mount Drive + GPU check
-    ├── Cell 2   All constants and settings
-    ├── Cell 3   Download from OpenImages via FiftyOne
-    ├── Cell 4   Visual data check
-    ├── Cell 5   AttentionUNet model definition
-    ├── Cell 6   Dataset + class weights + combined loss
-    ├── Cell 7A  Copy Drive data to local SSD
-    ├── Cell 7B  Create DataLoaders
-    ├── Cell 7C  Training loop with early stopping
-    ├── Cell 8   Plot training curve
-    ├── Cell 9   Evaluate on 200 test images
-    ├── Cell 10  Confusion matrix + visual predictions
-    └── Cell 11  Drive file summary
-```
-
----
-
-## 🔑 Key Design Decisions
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  DECISION             │  CHOICE                 │  REASON                │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Classes chosen       │  Car, Airplane, Dog      │  Visually maximally    │
-│                       │                          │  distinct — no         │
-│                       │                          │  overlap in shape      │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Architecture         │  Attention U-Net         │  Built for segmentation│
-│                       │                          │  skip connections keep │
-│                       │                          │  spatial detail        │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Pretrained weights   │  None — from scratch     │  Academic constraint   │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Loss function        │  CE + Dice  (50/50)      │  CE: per-pixel acc     │
-│                       │                          │  Dice: shape overlap   │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Class weighting      │  SegNet median freq      │  78% background would  │
-│                       │                          │  dominate without it   │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  LR schedule          │  Warmup + cosine decay   │  Stable early training │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Data storage         │  Drive → SSD copy        │  50x faster reads      │
-│                       │  at session start        │  per training epoch    │
-├───────────────────────┼─────────────────────────┼────────────────────────┤
-│  Early stopping       │  Patience = 12           │  Saves best checkpoint │
-│                       │                          │  prevents overfitting  │
-└───────────────────────┴─────────────────────────┴────────────────────────┘
-```
-
----
-
-## 🛠️ Technology Stack
-
-| Library | Purpose |
-|:---|:---|
-| **PyTorch** | Neural network, training loop, GPU computation |
-| **torchvision** | Functional image transforms |
-| **Albumentations** | Fast image and mask augmentation |
-| **FiftyOne** | OpenImages v7 download and management |
-| **Pillow** | Image loading, resizing, mask conversion |
-| **NumPy** | Array operations, mask manipulation |
-| **scikit-learn** | Precision, recall, F1, confusion matrix |
-| **Matplotlib** | Training curves and visualisations |
-| **Google Colab** | Cloud GPU notebook (Tesla T4) |
-| **Google Drive** | Persistent data and model storage |
-
----
-
-## 📚 References
-
-| Paper | Authors | Year | Used for |
-|:---|:---|:---:|:---|
-| [U-Net: Convolutional Networks for Biomedical Image Segmentation](https://arxiv.org/abs/1505.04597) | Ronneberger et al. | 2015 | Base architecture |
-| [Attention U-Net: Learning Where to Look for the Pancreas](https://arxiv.org/abs/1804.03999) | Oktay et al. | 2018 | Attention gates |
-| [SegNet: A Deep Convolutional Encoder-Decoder Architecture](https://arxiv.org/abs/1511.00561) | Badrinarayanan et al. | 2017 | Class weighting formula |
-| [V-Net: Fully Convolutional Neural Networks for Volumetric Segmentation](https://arxiv.org/abs/1606.04797) | Milletari et al. | 2016 | Dice loss |
-| [The Open Images Dataset V4](https://arxiv.org/abs/1811.00982) | Kuznetsova et al. | 2020 | Dataset |
-
----
-
-<div align="center">
-
-**Built with PyTorch &nbsp;·&nbsp; Trained on OpenImages v7 &nbsp;·&nbsp; Google Colab T4**
-
-</div>
+- PyTorch 2.x + torchvision
+- albumentations (augmentations)
+- FiftyOne (OpenImages download)
+- scikit-learn (metrics)
+- matplotlib (plots)
+- Colab T4/L4 GPU
